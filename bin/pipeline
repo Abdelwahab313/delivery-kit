@@ -1,0 +1,826 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import glob as globmod
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNNERS = ("jest", "rspec", "go", "pytest", "generic")
+PHASES = ("plan", "tests", "implement", "review", "done")
+LENSES = ("plan", "code", "feature")
+VALIDATE_ORDER = ("lint", "typecheck", "test_slice", "test_all", "build")
+NON_DOC_PREFIXES = ("/Users/", "/tmp/", "/etc/", "/usr/", "/var/", "/home/", "/opt/", "/private/", "/dev/")
+
+
+class Fail(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def sh(cmd, cwd, env=None, shell=True):
+    return subprocess.run(cmd, shell=shell, cwd=cwd, capture_output=True, text=True, env=env)
+
+
+def git(root, *args, env=None):
+    return sh(["git", *args], root, env=env, shell=False)
+
+
+def repo_root(start=None):
+    start = start or os.getcwd()
+    if not os.path.isdir(start):
+        return None
+    r = sh(["git", "rev-parse", "--show-toplevel"], start, shell=False)
+    if r.returncode != 0:
+        return None
+    return os.path.realpath(r.stdout.strip())
+
+
+def repo_id(root):
+    return f"{os.path.basename(root)}-{hashlib.sha1(root.encode()).hexdigest()[:8]}"
+
+
+def state_root(root):
+    return os.environ.get("PIPELINE_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude", "pipeline-state", repo_id(root)
+    )
+
+
+def profile_path(root):
+    return os.path.join(root, ".claude", "pipeline.json")
+
+
+def read_json(path, default=None):
+    if not os.path.isfile(path):
+        return default
+    with open(path) as f:
+        return json.load(f)
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def load_profile(root):
+    return read_json(profile_path(root))
+
+
+def current(root):
+    return read_json(os.path.join(state_root(root), "current.json"))
+
+
+def slice_dir(root, cur):
+    return os.path.join(state_root(root), cur["feature"], cur["slice"])
+
+
+def load_state(root, cur):
+    return read_json(os.path.join(slice_dir(root, cur), "state.json"))
+
+
+def save_state(root, cur, state):
+    write_json(os.path.join(slice_dir(root, cur), "state.json"), state)
+
+
+def evidence_path(root, cur):
+    return os.path.join(slice_dir(root, cur), "evidence.jsonl")
+
+
+def append_evidence(root, cur, row):
+    row = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), **row}
+    path = evidence_path(root, cur)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    return row
+
+
+def read_evidence(root, cur):
+    path = evidence_path(root, cur)
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def write_tree(root):
+    # Stage the working tree into a throwaway index so the user's real index is never touched.
+    fd, tmp = tempfile.mkstemp(prefix="pipeline-index-")
+    os.close(fd)
+    os.unlink(tmp)
+    env = {**os.environ, "GIT_INDEX_FILE": tmp}
+    try:
+        if git(root, "rev-parse", "--verify", "-q", "HEAD").returncode == 0:
+            git(root, "read-tree", "HEAD", env=env)
+        git(root, "add", "-A", env=env)
+        r = git(root, "write-tree", env=env)
+        return r.stdout.strip() or None
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def changed_files(root, base_tree, tree):
+    if not base_tree or not tree:
+        return []
+    r = git(root, "diff", "--name-only", base_tree, tree)
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def strip_rtk(cmd):
+    # rtk is a token-saving output proxy; the pipeline parses runner output itself.
+    return re.sub(r"^\s*rtk\s+", "", cmd)
+
+
+def run_cmds(root, cmds, subs=None):
+    shown, outputs, code = [], [], 0
+    for c in cmds:
+        c = strip_rtk(c)
+        for k, v in (subs or {}).items():
+            c = c.replace("{" + k + "}", v)
+        shown.append(c)
+        r = sh(c, root)
+        outputs.append(r.stdout + r.stderr)
+        if r.returncode != 0:
+            code = r.returncode
+            break
+    return " && ".join(shown), code, "\n".join(outputs)
+
+
+def glob_to_regex(pattern):
+    i, out = 0, ""
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out += "(?:.*/)?"
+            i += 3
+        elif pattern.startswith("**", i):
+            out += ".*"
+            i += 2
+        elif pattern[i] == "*":
+            out += "[^/]*"
+            i += 1
+        elif pattern[i] == "?":
+            out += "[^/]"
+            i += 1
+        else:
+            out += re.escape(pattern[i])
+            i += 1
+    return re.compile("^" + out + "$")
+
+
+def glob_match(path, pattern):
+    path = os.path.normpath(path).replace(os.sep, "/")
+    if path.startswith("./"):
+        path = path[2:]
+    if "/" not in pattern:
+        return glob_to_regex(pattern).match(os.path.basename(path)) is not None
+    return glob_to_regex(pattern).match(path) is not None
+
+
+def any_match(path, patterns):
+    return any(glob_match(path, p) for p in patterns or [])
+
+
+def _num(pattern, text):
+    m = re.search(pattern, text)
+    return int(m.group(1)) if m else 0
+
+
+def parse_output(runner, out, exit_code=0):
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if runner == "generic":
+        failed = 1 if exit_code != 0 else 0
+        return {"passed": 1 - failed, "failed": failed, "ran": True}
+    if runner == "jest":
+        for line in reversed(lines):
+            if line.startswith("Tests:"):
+                return {"passed": _num(r"(\d+) passed", line), "failed": _num(r"(\d+) failed", line), "ran": True}
+    if runner == "rspec":
+        for line in reversed(lines):
+            m = re.search(r"(\d+) examples?, (\d+) failures?", line)
+            if m:
+                examples, failed = int(m.group(1)), int(m.group(2))
+                pending = _num(r"(\d+) pending", line)
+                return {"passed": examples - failed - pending, "failed": failed, "ran": True}
+    if runner == "pytest":
+        for line in reversed(lines):
+            if re.match(r"^=+ .* in [\d.]+s", line):
+                return {"passed": _num(r"(\d+) passed", line), "failed": _num(r"(\d+) failed", line), "ran": True}
+    if runner == "go":
+        failed = sum(1 for line in lines if line.startswith("--- FAIL"))
+        passed = sum(1 for line in lines if line.startswith("--- PASS"))
+        if not (failed or passed):
+            failed = sum(1 for line in lines if re.match(r"^FAIL\s", line))
+            passed = sum(1 for line in lines if re.match(r"^ok\s", line))
+        if failed or passed:
+            return {"passed": passed, "failed": failed, "ran": True}
+    return {"passed": 0, "failed": 0, "ran": False}
+
+
+def artifacts_dir(root, profile, cur):
+    return os.path.join(root, profile.get("artifacts_dir", "specs"), cur["feature"])
+
+
+def slice_artifacts(root, profile, cur):
+    return os.path.join(artifacts_dir(root, profile, cur), "slices", cur["slice"])
+
+
+def slice_test_files(root, profile, cur):
+    spec = os.path.join(slice_artifacts(root, profile, cur), "SPEC.md")
+    if not os.path.isfile(spec):
+        return []
+    files, inside = [], False
+    with open(spec) as f:
+        for line in f:
+            if line.startswith("#"):
+                inside = line.strip().lower() == "## tests"
+                continue
+            if inside:
+                m = re.match(r"^\s*[-*]\s+`?([^`\s]+)`?", line)
+                if m:
+                    files.append(m.group(1))
+    return files
+
+
+def test_files_arg(profile, files):
+    prefix = profile.get("test_files_strip_prefix", "")
+    return " ".join(f[len(prefix):] if prefix and f.startswith(prefix) else f for f in files)
+
+
+def file_hashes(root, files):
+    hashes = {}
+    for rel in files:
+        path = os.path.join(root, rel)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                hashes[rel] = hashlib.sha1(f.read()).hexdigest()
+        else:
+            hashes[rel] = "missing"
+    return hashes
+
+
+def protected_dirty(root, profile, state, tree):
+    if not state.get("base_tree"):
+        return []
+    globs = list(profile.get("protected_globs", []))
+    if state.get("phase") == "implement":
+        globs += profile.get("test_globs", [])
+    return [f for f in changed_files(root, state["base_tree"], tree) if any_match(f, globs)]
+
+
+def context(need_state=True):
+    root = repo_root()
+    if not root:
+        raise Fail("not inside a git repository")
+    profile = load_profile(root)
+    if profile is None:
+        raise Fail(f"no profile at {profile_path(root)}; run `pipeline init --from <profile.json>`")
+    cur = current(root)
+    if not need_state:
+        return root, profile, cur, None
+    if not cur:
+        raise Fail("no current feature; run `pipeline start <feature>`")
+    state = load_state(root, cur)
+    if state is None:
+        raise Fail(f"state missing for {cur['feature']}/{cur['slice']}; run `pipeline start`")
+    return root, profile, cur, state
+
+
+def do_test(root, profile, cur, state, files=None):
+    files = files or slice_test_files(root, profile, cur)
+    cmds = profile.get("cmd", {}).get("test_slice")
+    if not cmds:
+        raise Fail("profile has no cmd.test_slice")
+    shown, code, out = run_cmds(root, cmds, {"test_files": test_files_arg(profile, files)})
+    parsed = parse_output(profile["runner"], out, code)
+    kind = "infra" if not parsed["ran"] else ("red" if parsed["failed"] > 0 else "green")
+    row = append_evidence(root, cur, {
+        "kind": kind, "cmd": shown, "exit": code, "parsed": parsed, "tree": write_tree(root),
+        "test_hashes": file_hashes(root, files), "flaky": False, "protected_dirty": [],
+    })
+    return row
+
+
+def do_probe(root, profile, cur):
+    probes_dir = os.path.join(slice_artifacts(root, profile, cur), "probes")
+    rows = []
+    if not os.path.isdir(probes_dir):
+        return rows
+    for name in sorted(os.listdir(probes_dir)):
+        path = os.path.join(probes_dir, name)
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            continue
+        r = sh([path], root, shell=False)
+        rows.append(append_evidence(root, cur, {
+            "kind": "probe", "probe": name, "cmd": path, "exit": r.returncode,
+            "parsed": {"passed": int(r.returncode == 0), "failed": int(r.returncode != 0), "ran": True},
+            "tree": None, "test_hashes": {}, "flaky": False, "protected_dirty": [],
+        }))
+    return rows
+
+
+def do_validate(root, profile, cur, state, quick=False):
+    cmd = profile.get("cmd", {})
+    files = slice_test_files(root, profile, cur)
+    parsed = {"passed": 0, "failed": 0, "ran": True}
+    steps, exit_code, flaky, reason = {}, 0, False, ""
+    subst = {"test_files": test_files_arg(profile, files)}
+    for step in VALIDATE_ORDER:
+        if not cmd.get(step):
+            continue
+        shown, code, out = run_cmds(root, cmd[step], subst)
+        if step in ("test_slice", "test_all"):
+            p = parse_output(profile["runner"], out, code)
+            if step == "test_slice" and p["ran"] and p["failed"] > 0:
+                _, code2, out2 = run_cmds(root, cmd[step], subst)
+                p2 = parse_output(profile["runner"], out2, code2)
+                if p2["ran"] and p2["failed"] == 0:
+                    flaky, p, code = True, p2, code2
+            if not p["ran"]:
+                parsed["ran"] = False
+                code = code or 3
+                reason = reason or f"{step}: no test summary parsed from runner output"
+            parsed["passed"] += p["passed"]
+            parsed["failed"] += p["failed"]
+            if p["failed"] > 0:
+                reason = reason or f"{step}: {p['failed']} failing"
+        steps[step] = code
+        if code != 0:
+            exit_code = code
+            reason = reason or f"{step} exited {code}"
+            break
+        if quick and step == "test_slice":
+            break
+    if not quick and exit_code == 0:
+        for row in do_probe(root, profile, cur):
+            steps[f"probe:{row['probe']}"] = row["exit"]
+            if row["exit"] != 0:
+                exit_code = exit_code or 1
+                reason = reason or f"probe {row['probe']} exited {row['exit']}"
+    tree = write_tree(root)
+    dirty = protected_dirty(root, profile, state, tree)
+    row = append_evidence(root, cur, {
+        "kind": "validate", "cmd": "validate --quick" if quick else "validate", "exit": exit_code,
+        "parsed": parsed, "tree": tree, "test_hashes": file_hashes(root, files), "flaky": flaky,
+        "protected_dirty": dirty, "steps": steps,
+    })
+    if dirty:
+        reason = (reason + "; " if reason else "") + "protected paths changed: " + ", ".join(dirty)
+    if flaky:
+        reason = (reason + "; " if reason else "") + "slice tests were red then green (flaky)"
+    ok = exit_code == 0 and parsed["failed"] == 0 and parsed["ran"] and not dirty and not flaky
+    return (0 if ok else 1), row, reason
+
+
+def check_red(root, profile, cur, state):
+    reds = [r for r in read_evidence(root, cur) if r["kind"] == "red"]
+    if not reds:
+        return 2, "no red run recorded: write the tests, then run `pipeline test` and make sure they fail"
+    last = reds[-1]
+    if last["parsed"]["failed"] <= 0:
+        return 2, "last red row has no failing tests; run `pipeline test` again"
+    now = file_hashes(root, list(last["test_hashes"]))
+    changed = [p for p in now if now[p] != last["test_hashes"].get(p)]
+    if changed:
+        return 2, "test files changed since the last red run: " + ", ".join(changed) + "; re-run `pipeline test`"
+    return 0, "red run verified"
+
+
+def check_green(root, profile, cur, state):
+    code, row, reason = do_validate(root, profile, cur, state, quick=True)
+    if code == 0:
+        return 0, "validate --quick green"
+    state["block_count"] = state.get("block_count", 0) + 1
+    n = state["block_count"]
+    if n >= 3:
+        state["status"] = "blocked"
+        save_state(root, cur, state)
+        return 0, f"blocked after {n} failed validations: {reason}"
+    save_state(root, cur, state)
+    return 2, f"validate --quick failed ({n}/3): {reason}. Fix, then run `pipeline validate --quick`"
+
+
+def check_commit(root, profile, cur, state):
+    rows = [r for r in read_evidence(root, cur) if r["kind"] == "validate"]
+    last = rows[-1] if rows else None
+    if last is None or last["tree"] != write_tree(root):
+        _, last, _ = do_validate(root, profile, cur, state, quick=True)
+    problems = []
+    if last["exit"] != 0 or last["parsed"]["failed"] > 0 or not last["parsed"]["ran"]:
+        problems.append(f"validate is red ({last['parsed']['failed']} failing, exit {last['exit']}); run `pipeline validate`")
+    if last["protected_dirty"]:
+        problems.append("protected paths changed: " + ", ".join(last["protected_dirty"]))
+    if last.get("flaky"):
+        problems.append("a flaky run is recorded; fix the test and re-run `pipeline validate`")
+    verdicts = state.get("verdicts", {})
+    if verdicts.get("code") != "PASS":
+        problems.append(f"code review verdict is {verdicts.get('code', 'missing')}, needs PASS")
+    probes_dir = os.path.join(slice_artifacts(root, profile, cur), "probes")
+    if os.path.isdir(probes_dir) and os.listdir(probes_dir) and verdicts.get("feature") != "PASS":
+        problems.append(f"feature verdict is {verdicts.get('feature', 'missing')}, needs PASS (probes exist)")
+    if problems:
+        return 2, "\n".join(problems)
+    return 0, "commit gate passed"
+
+
+def receipt_cells(line):
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    for i, c in enumerate(cells):
+        if re.fullmatch(r"\[?V\]?", c):
+            return cells[i - 1] if i > 0 else ""
+    return None
+
+
+def check_claims(root, profile, files):
+    docs = set((profile.get("docs") or {}).values())
+    violations = []
+    for path in files:
+        if not os.path.isfile(path):
+            continue
+        rel = os.path.relpath(path, root)
+        with open(path) as f:
+            lines = f.read().splitlines()
+        for n, line in enumerate(lines, 1):
+            if "[NEEDS CLARIFICATION" in line:
+                violations.append(f"{rel}:{n}: unresolved [NEEDS CLARIFICATION]")
+            if line.lstrip().startswith("|"):
+                receipt = receipt_cells(line)
+                if receipt is not None and not receipt:
+                    violations.append(f"{rel}:{n}: row tagged V has no receipt")
+            for m in re.finditer(r"(?<![\w/:.-])([\w./-]+\.\w+):(\d+)(?:-(\d+))?\b", line):
+                target, start = m.group(1), int(m.group(2))
+                if "://" in line[max(0, m.start() - 8):m.start() + 2]:
+                    continue
+                full = os.path.join(root, target)
+                if not os.path.isfile(full):
+                    violations.append(f"{rel}:{n}: receipt {target}:{start} — file not found")
+                    continue
+                with open(full, "rb") as f:
+                    total = sum(1 for _ in f)
+                if start > total:
+                    violations.append(f"{rel}:{n}: receipt {target}:{start} — file has {total} lines")
+            for m in re.finditer(r"`(/[\w.-]+/[\w.-]+(?:/[\w.-]+)?)`", line):
+                doc = m.group(1)
+                if doc.startswith(NON_DOC_PREFIXES) or os.path.exists(os.path.join(root, doc.lstrip("/"))):
+                    continue
+                if doc not in docs:
+                    violations.append(f"{rel}:{n}: doc id {doc} is not in pipeline.json docs")
+    return violations
+
+
+def role_of(data):
+    agent = (data.get("agent_type") or "").strip()
+    return agent.split(":", 1)[1] if agent.startswith("delivery-kit:") else agent
+
+
+def rel_in_root(root, target, cwd=None):
+    if not target:
+        return None
+    target = target.strip().strip("'\"")
+    if target.startswith(("&", "/dev/")):
+        return None
+    base = cwd if cwd and os.path.isdir(cwd) else root
+    full = os.path.realpath(target if os.path.isabs(target) else os.path.join(base, target))
+    rel = os.path.relpath(full, root)
+    if rel.startswith(".."):
+        return None
+    return rel
+
+
+WRITING_CMDS = {"rm", "mv", "cp", "tee", "touch", "truncate", "install", "ln"}
+
+
+def bash_targets(command):
+    targets = []
+    for segment in re.split(r"&&|\|\||;|\|", command):
+        for m in re.finditer(r">{1,2}\s*(\S+)", segment):
+            targets.append(m.group(1))
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        if not tokens:
+            continue
+        if tokens[0] in ("sudo", "env") and len(tokens) > 1:
+            tokens = tokens[1:]
+        head = tokens[0]
+        args = [t for t in tokens[1:] if t and not t.startswith("-") and not re.match(r"^\d*>", t)]
+        if head == "sed" and any(t.startswith("-i") for t in tokens):
+            targets += args[1:]
+        elif head in WRITING_CMDS:
+            targets += args
+        elif head == "git" and "--" in tokens and any(t in ("checkout", "restore") for t in tokens):
+            targets += tokens[tokens.index("--") + 1:]
+    return [t for t in targets if t and not t.startswith((">", "&", "/dev/"))]
+
+
+def role_may_edit(role, rel, profile):
+    tests = profile.get("test_globs", [])
+    shared = profile.get("shared_globs", [])
+    protected = profile.get("protected_globs", [])
+    if role == "test-author":
+        return any_match(rel, tests + shared)
+    if role == "implementer":
+        return not any_match(rel, tests + protected)
+    return not any_match(rel, protected)
+
+
+def hook_h1(data, root, profile, cur, state):
+    if state.get("phase") not in ("tests", "implement"):
+        return 0, ""
+    role = role_of(data)
+    if not role:
+        return 0, ""
+    tool = data.get("tool_name")
+    tool_input = data.get("tool_input") or {}
+    if tool == "Bash":
+        command = tool_input.get("command", "")
+        if re.search(r"\bpipeline\s+(start|phase|verdict)\b", command):
+            return 2, f"{role} may not run `pipeline start|phase|verdict`; only the orchestrator changes pipeline state"
+        targets = bash_targets(command)
+    elif tool in ("Edit", "Write"):
+        targets = [tool_input.get("file_path", "")]
+    else:
+        return 0, ""
+    denied = []
+    for t in targets:
+        rel = rel_in_root(root, t, data.get("cwd"))
+        if rel is not None and not role_may_edit(role, rel, profile):
+            denied.append(rel)
+    if denied:
+        return 2, f"{role} may not edit {', '.join(denied)} during phase {state['phase']} (see .claude/pipeline.json globs)"
+    return 0, ""
+
+
+def hook_h5(data, root, profile, cur, state):
+    command = (data.get("tool_input") or {}).get("command", "")
+    if not re.search(r"^\s*(rtk\s+)?git\b.*\bcommit\b", command):
+        return 0, ""
+    if state.get("phase") not in ("implement", "review"):
+        return 0, ""
+    return check_commit(root, profile, cur, state)
+
+
+def hook_h6(data, root, profile, cur, state):
+    role = role_of(data)
+    if role == "reviewer" and state.get("phase") != "plan":
+        return 0, ""
+    base = artifacts_dir(root, profile, cur)
+    files = sorted(globmod.glob(os.path.join(base, "*.md")) + globmod.glob(os.path.join(base, "slices", "*", "SPEC.md")))
+    if not files:
+        return 0, ""
+    violations = check_claims(root, profile, files)
+    if violations:
+        return 2, "\n".join(violations)
+    return 0, ""
+
+
+HOOKS = {
+    "h1": hook_h1,
+    "h3": lambda d, *ctx: check_red(*ctx),
+    "h4": lambda d, *ctx: check_green(*ctx),
+    "h5": hook_h5,
+    "h6": hook_h6,
+}
+
+
+def cmd_hook(args):
+    try:
+        data = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    root = repo_root(data.get("cwd") or os.getcwd())
+    if not root:
+        return 0
+    profile = load_profile(root)
+    cur = current(root) if profile else None
+    state = load_state(root, cur) if cur else None
+    if not (profile and cur and state):
+        return 0
+    code, reason = HOOKS[args.name](data, root, profile, cur, state)
+    if code != 0 and reason:
+        print(reason, file=sys.stderr)
+    return code
+
+
+def cmd_init(args):
+    root = repo_root()
+    if not root:
+        raise Fail("not inside a git repository")
+    dest = profile_path(root)
+    if os.path.exists(dest) and not args.force:
+        raise Fail(f"{dest} exists; use --force to overwrite")
+    profile = read_json(args.src)
+    if profile is None:
+        raise Fail(f"profile not found: {args.src}")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copyfile(args.src, dest)
+    os.makedirs(os.path.join(root, profile.get("artifacts_dir", "specs")), exist_ok=True)
+    print(f"ok profile written to {dest}")
+    return 0
+
+
+def cmd_doctor(args):
+    lines, ok = [], True
+
+    def report(good, text):
+        nonlocal ok
+        ok = ok and good
+        lines.append(("ok   " if good else "FAIL ") + text)
+
+    root = repo_root()
+    report(bool(root), "git repository" + (f" at {root}" if root else ""))
+    if not root:
+        print("\n".join(lines))
+        return 1
+    clean = git(root, "status", "--porcelain").stdout.strip() == ""
+    report(clean, "working tree clean")
+    profile = None
+    try:
+        profile = load_profile(root)
+        report(profile is not None, f"profile {profile_path(root)}")
+    except json.JSONDecodeError as e:
+        report(False, f"profile parses ({e})")
+    if profile:
+        runner = profile.get("runner")
+        report(runner in RUNNERS, f"runner {runner!r} is one of {', '.join(RUNNERS)}")
+        cmd = profile.get("cmd") or {}
+        bad = [k for k, v in cmd.items() if not (isinstance(v, list) and all(isinstance(c, str) for c in v))]
+        report(not bad, "cmd entries are lists of strings (empty = step skipped)" + (f" (bad: {', '.join(bad)})" if bad else ""))
+        if runner in RUNNERS and cmd.get("test_all") and not bad:
+            shown, code, out = run_cmds(root, cmd["test_all"])
+            parsed = parse_output(runner, out, code)
+            report(code == 0 and parsed["ran"], f"test_all `{shown}` exit {code}, parsed {parsed}")
+        else:
+            report(False, "test_all runnable")
+    sr = state_root(root)
+    try:
+        os.makedirs(sr, exist_ok=True)
+        probe = os.path.join(sr, ".write-test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.unlink(probe)
+        report(True, f"state root writable {sr}")
+    except OSError as e:
+        report(False, f"state root writable {sr} ({e})")
+    hooks = os.path.join(PLUGIN_ROOT, "hooks", "hooks.json")
+    report(os.path.isfile(hooks), f"plugin hooks {hooks}")
+    print("\n".join(lines))
+    return 0 if ok else 1
+
+
+def cmd_start(args):
+    root, profile, _, _ = context(need_state=False)
+    cur = {"feature": args.feature, "slice": args.slice}
+    if load_state(root, cur) is None:
+        save_state(root, cur, {
+            "phase": "plan", "tier": args.tier, "base_tree": None, "block_count": 0,
+            "status": "active", "verdicts": {},
+        })
+    write_json(os.path.join(state_root(root), "current.json"), cur)
+    print(f"ok {cur['feature']}/{cur['slice']} tier {args.tier} is current; state in {slice_dir(root, cur)}")
+    return 0
+
+
+def cmd_phase(args):
+    root, profile, cur, state = context()
+    state["phase"] = args.phase
+    if args.phase == "implement":
+        state["base_tree"] = write_tree(root)
+    if args.phase == "done":
+        state["status"] = "done"
+    save_state(root, cur, state)
+    print(f"ok phase {args.phase}" + (f" base_tree {state['base_tree']}" if args.phase == "implement" else ""))
+    return 0
+
+
+def cmd_test(args):
+    root, profile, cur, state = context()
+    row = do_test(root, profile, cur, state, args.files)
+    p = row["parsed"]
+    print(f"{row['kind']}: {p['passed']} passed, {p['failed']} failed (exit {row['exit']})")
+    return {"green": 0, "red": 1, "infra": 3}[row["kind"]]
+
+
+def cmd_validate(args):
+    root, profile, cur, state = context()
+    code, row, reason = do_validate(root, profile, cur, state, quick=args.quick)
+    p = row["parsed"]
+    print(f"validate {'green' if code == 0 else 'red'}: {p['passed']} passed, {p['failed']} failed, tree {row['tree']}")
+    if reason:
+        print(reason)
+    return code
+
+
+def cmd_probe(args):
+    root, profile, cur, state = context()
+    rows = do_probe(root, profile, cur)
+    for r in rows:
+        print(f"probe {r['probe']}: exit {r['exit']}")
+    if not rows:
+        print("no probes")
+    return 0 if all(r["exit"] == 0 for r in rows) else 1
+
+
+def cmd_check(args):
+    root, profile, cur, state = context(need_state=args.what != "claims")
+    if args.what == "claims":
+        violations = check_claims(root, profile, [os.path.abspath(f) for f in args.files])
+        if violations:
+            print("\n".join(violations), file=sys.stderr)
+            return 2
+        print("ok claims")
+        return 0
+    fn = {"red": check_red, "green": check_green, "commit": check_commit}[args.what]
+    code, reason = fn(root, profile, cur, state)
+    print(reason, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def cmd_verdict(args):
+    root, profile, cur, state = context()
+    state.setdefault("verdicts", {})[args.lens] = args.result
+    save_state(root, cur, state)
+    if args.findings:
+        shutil.copyfile(args.findings, os.path.join(slice_dir(root, cur), f"findings-{args.lens}.md"))
+    print(f"ok verdict {args.lens} {args.result}")
+    return 0
+
+
+def cmd_status(args):
+    root, profile, cur, state = context()
+    print(json.dumps({"current": cur, "state": state, "evidence": read_evidence(root, cur)[-5:]}, indent=2))
+    return 0
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="pipeline", description="delivery-kit evidence and state CLI")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("init")
+    s.add_argument("--from", dest="src", required=True)
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_init)
+
+    sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("start")
+    s.add_argument("feature")
+    s.add_argument("--slice", default="S01")
+    s.add_argument("--tier", default="S", choices=("S", "M", "L"))
+    s.set_defaults(fn=cmd_start)
+
+    s = sub.add_parser("phase")
+    s.add_argument("phase", choices=PHASES)
+    s.set_defaults(fn=cmd_phase)
+
+    s = sub.add_parser("test")
+    s.add_argument("--files", nargs="*")
+    s.set_defaults(fn=cmd_test)
+
+    s = sub.add_parser("validate")
+    s.add_argument("--quick", action="store_true")
+    s.set_defaults(fn=cmd_validate)
+
+    sub.add_parser("probe").set_defaults(fn=cmd_probe)
+
+    s = sub.add_parser("check")
+    s.add_argument("what", choices=("red", "green", "commit", "claims"))
+    s.add_argument("files", nargs="*")
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("verdict")
+    s.add_argument("lens", choices=LENSES)
+    s.add_argument("result", choices=("PASS", "FAIL"))
+    s.add_argument("--findings")
+    s.set_defaults(fn=cmd_verdict)
+
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("hook")
+    s.add_argument("name", choices=sorted(HOOKS))
+    s.set_defaults(fn=cmd_hook)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args)
+    except Fail as e:
+        print(f"pipeline: {e}", file=sys.stderr)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

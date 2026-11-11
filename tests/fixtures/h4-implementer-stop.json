@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture",
+  "transcript_path": "/dev/null",
+  "cwd": ".",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_id": "a2",
+  "agent_type": "delivery-kit:implementer",
+  "agent_transcript_path": "/dev/null",
+  "last_assistant_message": "All green.",
+  "background_tasks": [],
+  "session_crons": []
+}

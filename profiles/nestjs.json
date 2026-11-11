@@ -1,0 +1,17 @@
+{
+  "kit_version": "0.1.0",
+  "artifacts_dir": "specs",
+  "runner": "jest",
+  "test_globs": ["src/**/*.spec.ts", "test/**"],
+  "shared_globs": ["test/factories/**", "test/fixtures/**"],
+  "protected_globs": ["jest.config.*", "package.json", ".claude/pipeline.json", "tsconfig*.json"],
+  "cmd": {
+    "test_slice": ["npx jest {test_files}"],
+    "test_all":   ["npm test"],
+    "lint":       ["npm run lint"],
+    "typecheck":  ["npx tsc --noEmit"],
+    "build":      ["npm run build"],
+    "e2e":        ["npm run test:e2e"]
+  },
+  "docs": { "nestjs": "/nestjs/docs.nestjs.com", "prisma": "/websites/prisma_io", "bullmq": "/nestjs/bull" }
+}

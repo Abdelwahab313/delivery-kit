@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture",
+  "transcript_path": "/dev/null",
+  "cwd": ".",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {"file_path": "src/x.ts", "old_string": "1", "new_string": "2"},
+  "tool_use_id": "t5",
+  "agent_id": "a2",
+  "agent_type": "delivery-kit:implementer"
+}

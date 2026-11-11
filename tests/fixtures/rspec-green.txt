@@ -1,0 +1,11 @@
+Randomized with seed 7731
+....*
+
+Pending: (Failures listed here are expected and do not affect your suite's status)
+
+  1) Projects::ArchiveService#call refunds unused credits
+     # Not yet implemented
+     # ./spec/services/projects/archive_service_spec.rb:30
+
+Finished in 0.8471 seconds (files took 4.02 seconds to load)
+5 examples, 0 failures, 1 pending

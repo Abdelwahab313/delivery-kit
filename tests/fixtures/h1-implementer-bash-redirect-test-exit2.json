@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture",
+  "transcript_path": "/dev/null",
+  "cwd": ".",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "echo 'exit 0' > tests/test_a.sh && cat tests/test_a.sh", "description": "rewrite test"},
+  "tool_use_id": "t4",
+  "agent_id": "a2",
+  "agent_type": "delivery-kit:implementer"
+}

@@ -1,0 +1,26 @@
+Randomized with seed 41832
+..F.F
+
+Failures:
+
+  1) Projects::ArchiveService#call marks the project archived
+     Failure/Error: expect(project.reload.status).to eq('archived')
+
+       expected: "archived"
+            got: "active"
+
+       (compared using ==)
+     # ./spec/services/projects/archive_service_spec.rb:18:in 'block (3 levels) in <top (required)>'
+
+  2) Projects::ArchiveService#call enqueues the cleanup job
+     Failure/Error: expect { service.call }.to have_enqueued_job(CleanupJob)
+       expected to enqueue exactly 1 jobs, but enqueued 0
+     # ./spec/services/projects/archive_service_spec.rb:24:in 'block (3 levels) in <top (required)>'
+
+Finished in 0.9123 seconds (files took 4.21 seconds to load)
+5 examples, 2 failures
+
+Failed examples:
+
+rspec ./spec/services/projects/archive_service_spec.rb:16 # Projects::ArchiveService#call marks the project archived
+rspec ./spec/services/projects/archive_service_spec.rb:22 # Projects::ArchiveService#call enqueues the cleanup job

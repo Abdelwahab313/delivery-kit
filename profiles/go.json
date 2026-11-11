@@ -1,0 +1,17 @@
+{
+  "kit_version": "0.1.0",
+  "artifacts_dir": "specs",
+  "runner": "go",
+  "test_globs": ["**/*_test.go"],
+  "shared_globs": ["internal/testutil/**", "testdata/**"],
+  "protected_globs": ["go.mod", "go.sum", ".claude/pipeline.json"],
+  "cmd": {
+    "test_slice": ["go test -v {test_files}"],
+    "test_all":   ["go test ./..."],
+    "lint":       ["go vet ./..."],
+    "typecheck":  ["go build ./..."],
+    "build":      ["go build ./..."],
+    "e2e":        []
+  },
+  "docs": { "go": "/golang/go", "go-doc": "/websites/go_dev_doc" }
+}

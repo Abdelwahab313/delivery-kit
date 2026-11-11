@@ -1,0 +1,12 @@
+PASS src/users/users.service.spec.ts
+PASS src/users/users.controller.spec.ts
+  UsersController
+    GET /users/:id
+      ✓ returns the user (31 ms)
+      ✓ returns 404 for an unknown id (9 ms)
+
+Test Suites: 2 passed, 2 total
+Tests:       3 passed, 3 total
+Snapshots:   0 total
+Time:        1.611 s, estimated 2 s
+Ran all test suites matching /users/i.

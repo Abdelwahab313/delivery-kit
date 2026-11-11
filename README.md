@@ -47,6 +47,21 @@ State and evidence live outside the repo under `~/.claude/pipeline-state/<repo-i
 Registered in the local marketplace `~/.claude/local-marketplace/.claude-plugin/marketplace.json`
 as `delivery-kit@abdelwahab-local`. For development: `claude --plugin-dir <this directory>`.
 
+## Coexistence with other setups
+
+- Agents are namespaced: spawn them as `delivery-kit:planner`, `delivery-kit:reviewer`,
+  `delivery-kit:test-author`, `delivery-kit:implementer`. A repo's own `.claude/agents/planner.md`
+  (PTC has one) is a different agent and is not shadowed.
+- The hooks in `hooks/hooks.json` are global once the plugin is enabled. Every gate exits 0
+  immediately when the current repo has no `.claude/pipeline.json` or no active feature
+  (`current.json`), so repos that do not use the kit only pay one `python3` start per matched
+  tool call.
+- State never enters the repo: `~/.claude/pipeline-state/<repo-id>/`.
+- `rtk`: a leading `rtk ` in any configured command is stripped before running; the CLI parses
+  runner output itself.
+
 ## Status
 
-0.1.0 — skeleton. Build order is in `docs/PLAN.md` §4 and the handoff notes.
+0.1.0 — CLI, hooks, agents, skill, templates, profiles and rubric written; 40 CLI tests
+(`python3 -m unittest discover -s tests`). Pilot pending on `~/projects/ptc-nest-onboarding`.
+Build order is in `docs/PLAN.md` §4.

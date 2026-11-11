@@ -1,0 +1,8 @@
+=== RUN   TestParseHeader
+--- PASS: TestParseHeader (0.00s)
+=== RUN   TestParseHeader_Empty
+--- PASS: TestParseHeader_Empty (0.00s)
+=== RUN   TestWriteEntry
+--- PASS: TestWriteEntry (0.00s)
+PASS
+ok  	github.com/abdelwahab/formatd/internal/po	0.011s

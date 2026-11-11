@@ -1,0 +1,18 @@
+{
+  "kit_version": "0.1.0",
+  "artifacts_dir": "tasks",
+  "runner": "rspec",
+  "test_files_strip_prefix": "backend/",
+  "test_globs": ["backend/spec/**/*_spec.rb", "frontend/**/*.test.*"],
+  "shared_globs": ["backend/spec/factories/**", "backend/spec/support/**"],
+  "protected_globs": ["Makefile", "backend/.rubocop.yml", "backend/.rubocop_todo.yml", "frontend/jest.config.js", "backend/Gemfile", "backend/Gemfile.lock", "frontend/package.json", ".claude/pipeline.json"],
+  "cmd": {
+    "test_slice": ["make test ARGS={test_files}"],
+    "test_all":   ["make test"],
+    "lint":       ["docker compose --env-file backend/.env --env-file backend/.env.local -f docker-compose.yml run --rm --no-deps web bundle exec rubocop", "make test-ui-lint"],
+    "typecheck":  [],
+    "build":      ["make test-ui-full"],
+    "e2e":        []
+  },
+  "docs": { "rails": "/websites/guides_rubyonrails", "rails-api": "/websites/api_rubyonrails", "rspec-rails": "/rspec/rspec-rails" }
+}

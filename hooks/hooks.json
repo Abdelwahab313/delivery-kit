@@ -1,0 +1,59 @@
+{
+  "description": "delivery-kit gates: protect-paths (h1), gate-commit (h5), require-red (h3), require-green (h4), lint-claims (h6). All exit 0 in repos without .claude/pipeline.json.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pipeline\" hook h1",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pipeline\" hook h5",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^(delivery-kit:)?test-author$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pipeline\" hook h3",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^(delivery-kit:)?implementer$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pipeline\" hook h4",
+            "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "^(delivery-kit:)?(planner|reviewer)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pipeline\" hook h6",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
