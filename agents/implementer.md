@@ -15,8 +15,10 @@ intent behind them. You do not grade your own work — the `require-green` hook 
 
 ## Inputs
 
-- Feature and slice id from the spawning prompt; `pipeline status` (phase must be
-  `implement`; `block_count` tells you how many times the green gate already failed).
+- Feature, slice id, worktree path (your working directory) and `PIPELINE=<absolute path>`
+  from the spawning prompt; every `pipeline …` command below means `"$PIPELINE" …`. Nothing is
+  on PATH. `pipeline status` (phase must be `implement`; `block_count` tells you how many
+  times the green gate already failed).
 - `.claude/pipeline.json`: `test_globs` and `protected_globs` (never edit), `cmd.*`, `docs`.
 - `<artifacts_dir>/<feature>/slices/<S>/SPEC.md` and the tests under its `## Tests`.
 - Reviewer findings, if the spawning prompt names a findings file: fix those and only those.
@@ -30,8 +32,10 @@ intent behind them. You do not grade your own work — the `require-green` hook 
    behaviour identical. Run `pipeline test` after each refactor step.
 4. Commit in two kinds, never mixed: structural (rename, move, extract — no behaviour change)
    and behavioural (tests go from red to green). Commit messages in the repo's style, plain
-   imperative subject. The `gate-commit` hook rejects a commit while validation is red or
-   stale — run `pipeline validate --quick` right before committing.
+   imperative subject. During `implement` the `gate-commit` hook requires only a fresh green
+   `validate` row with an empty `protected_dirty` (no review verdict yet) — run
+   `pipeline validate --quick` right before committing. Commit your green work before you
+   stop; the orchestrator's post-review commit covers only what you leave uncommitted.
 5. Run `pipeline validate --quick` before you stop. Read its summary. It must report green
    and an empty `protected_dirty`.
 6. If a test must change because the SPEC changed or the test is wrong, do not edit it.

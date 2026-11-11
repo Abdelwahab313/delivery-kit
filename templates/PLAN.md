@@ -4,8 +4,9 @@ Tier: M | L. Status: draft | approved. Date: <YYYY-MM-DD>.
 
 Receipt legend: **V** verified — the receipt is a `path:line` in this repo, a command with its
 quoted output, or a documentation id listed in `.claude/pipeline.json` `docs`. **A** assumed —
-listed under Unknowns with how it will be verified. Where the request is ambiguous, write
-`[NEEDS CLARIFICATION: <question>]` in place; none may remain at approval.
+listed under Unknowns with how it will be verified. Where the request is ambiguous, write a
+NEEDS CLARIFICATION marker (square brackets, colon, the question) in place; none may remain
+at approval.
 
 ## Problem
 
@@ -31,7 +32,7 @@ repo conventions), each with a receipt.
 ## Unknowns
 
 - [A] <claim from the Facts table> — verify by <command, file, or question to the human>.
-- [NEEDS CLARIFICATION: <question>]
+- one NEEDS CLARIFICATION marker per open question to the human
 
 ## Approach
 

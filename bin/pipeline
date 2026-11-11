@@ -34,8 +34,11 @@ def git(root, *args, env=None):
     return sh(["git", *args], root, env=env, shell=False)
 
 
+WORKDIR = None
+
+
 def repo_root(start=None):
-    start = start or os.getcwd()
+    start = start or WORKDIR or os.getcwd()
     if not os.path.isdir(start):
         return None
     r = sh(["git", "rev-parse", "--show-toplevel"], start, shell=False)
@@ -273,7 +276,7 @@ def protected_dirty(root, profile, state, tree):
     if not state.get("base_tree"):
         return []
     globs = list(profile.get("protected_globs", []))
-    if state.get("phase") == "implement":
+    if state.get("phase") in ("implement", "review"):
         globs += profile.get("test_globs", [])
     return [f for f in changed_files(root, state["base_tree"], tree) if any_match(f, globs)]
 
@@ -422,12 +425,13 @@ def check_commit(root, profile, cur, state):
         problems.append("protected paths changed: " + ", ".join(last["protected_dirty"]))
     if last.get("flaky"):
         problems.append("a flaky run is recorded; fix the test and re-run `pipeline validate`")
-    verdicts = state.get("verdicts", {})
-    if verdicts.get("code") != "PASS":
-        problems.append(f"code review verdict is {verdicts.get('code', 'missing')}, needs PASS")
-    probes_dir = os.path.join(slice_artifacts(root, profile, cur), "probes")
-    if os.path.isdir(probes_dir) and os.listdir(probes_dir) and verdicts.get("feature") != "PASS":
-        problems.append(f"feature verdict is {verdicts.get('feature', 'missing')}, needs PASS (probes exist)")
+    if state.get("phase") in ("review", "done"):
+        verdicts = state.get("verdicts", {})
+        if verdicts.get("code") != "PASS":
+            problems.append(f"code review verdict is {verdicts.get('code', 'missing')}, needs PASS")
+        probes_dir = os.path.join(slice_artifacts(root, profile, cur), "probes")
+        if os.path.isdir(probes_dir) and os.listdir(probes_dir) and verdicts.get("feature") != "PASS":
+            problems.append(f"feature verdict is {verdicts.get('feature', 'missing')}, needs PASS (probes exist)")
     if problems:
         return 2, "\n".join(problems)
     return 0, "commit gate passed"
@@ -451,7 +455,7 @@ def check_claims(root, profile, files):
         with open(path) as f:
             lines = f.read().splitlines()
         for n, line in enumerate(lines, 1):
-            if "[NEEDS CLARIFICATION" in line:
+            if re.search(r"\[NEEDS CLARIFICATION:\s*(?![\s…\.]*\])[^\]]*\]", line):
                 violations.append(f"{rel}:{n}: unresolved [NEEDS CLARIFICATION]")
             if line.lstrip().startswith("|"):
                 receipt = receipt_cells(line)
@@ -524,19 +528,22 @@ def bash_targets(command):
     return [t for t in targets if t and not t.startswith((">", "&", "/dev/"))]
 
 
-def role_may_edit(role, rel, profile):
+def role_may_edit(role, rel, profile, cur=None):
     tests = profile.get("test_globs", [])
     shared = profile.get("shared_globs", [])
     protected = profile.get("protected_globs", [])
     if role == "test-author":
-        return any_match(rel, tests + shared)
+        slice_glob = []
+        if cur:
+            slice_glob = [f"{profile.get('artifacts_dir', 'specs')}/{cur['feature']}/slices/{cur['slice']}/**"]
+        return any_match(rel, tests + shared + slice_glob)
     if role == "implementer":
         return not any_match(rel, tests + protected)
     return not any_match(rel, protected)
 
 
 def hook_h1(data, root, profile, cur, state):
-    if state.get("phase") not in ("tests", "implement"):
+    if state.get("phase") not in ("tests", "implement", "review"):
         return 0, ""
     role = role_of(data)
     if not role:
@@ -555,7 +562,7 @@ def hook_h1(data, root, profile, cur, state):
     denied = []
     for t in targets:
         rel = rel_in_root(root, t, data.get("cwd"))
-        if rel is not None and not role_may_edit(role, rel, profile):
+        if rel is not None and not role_may_edit(role, rel, profile, cur):
             denied.append(rel)
     if denied:
         return 2, f"{role} may not edit {', '.join(denied)} during phase {state['phase']} (see .claude/pipeline.json globs)"
@@ -566,7 +573,7 @@ def hook_h5(data, root, profile, cur, state):
     command = (data.get("tool_input") or {}).get("command", "")
     if not re.search(r"^\s*(rtk\s+)?git\b.*\bcommit\b", command):
         return 0, ""
-    if state.get("phase") not in ("implement", "review"):
+    if state.get("phase") not in ("tests", "implement", "review", "done"):
         return 0, ""
     return check_commit(root, profile, cur, state)
 
@@ -695,7 +702,9 @@ def cmd_start(args):
 def cmd_phase(args):
     root, profile, cur, state = context()
     state["phase"] = args.phase
-    if args.phase == "implement":
+    if args.phase == "tests":
+        state["base_tree"] = None
+    if args.phase == "implement" and not state.get("base_tree"):
         state["base_tree"] = write_tree(root)
     if args.phase == "done":
         state["status"] = "done"
@@ -752,7 +761,10 @@ def cmd_verdict(args):
     state.setdefault("verdicts", {})[args.lens] = args.result
     save_state(root, cur, state)
     if args.findings:
-        shutil.copyfile(args.findings, os.path.join(slice_dir(root, cur), f"findings-{args.lens}.md"))
+        dest = os.path.join(slice_dir(root, cur), f"findings-{args.lens}.md")
+        src = os.path.realpath(args.findings)
+        if src != os.path.realpath(dest) and not src.startswith(os.path.realpath(slice_dir(root, cur)) + os.sep):
+            shutil.copyfile(src, dest)
     print(f"ok verdict {args.lens} {args.result}")
     return 0
 
@@ -765,6 +777,7 @@ def cmd_status(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="pipeline", description="delivery-kit evidence and state CLI")
+    p.add_argument("-C", dest="workdir", metavar="PATH", help="run as if started in PATH (repo detection)")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init")
@@ -815,6 +828,9 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    global WORKDIR
+    if args.workdir:
+        WORKDIR = os.path.realpath(args.workdir)
     try:
         return args.fn(args)
     except Fail as e:

@@ -16,8 +16,12 @@ files on disk — the `require-red` hook will not let you stop before that.
 ## Inputs
 
 - Feature and slice id from the spawning prompt.
-- `.claude/pipeline.json`: `test_globs`, `shared_globs` (the only paths you may edit),
-  `cmd.test_slice`, `docs`.
+- `PIPELINE=<absolute path>` from the spawning prompt; every `pipeline …` command below means
+  `"$PIPELINE" …`. Nothing is on PATH. Your working directory is the worktree path the prompt
+  names.
+- `.claude/pipeline.json`: `test_globs`, `shared_globs`, `cmd.test_slice`, `docs`. You may edit
+  paths matching `test_globs` or `shared_globs`, plus this slice's own
+  `<artifacts_dir>/<feature>/slices/<S>/` (SPEC.md `## Tests` bullets and `probes/`).
 - `<artifacts_dir>/<feature>/slices/<S>/SPEC.md`: the AC (EARS form), `## Tests`, `## Probes`.
 - Existing tests under `test_globs` for the conventions in use (factories, helpers, setup).
   Read two or three before writing one.
@@ -47,8 +51,9 @@ files on disk — the `require-red` hook will not let you stop before that.
 
 ## Hard rules
 
-- Edit only paths matching `test_globs` or `shared_globs`. Never product code, never
-  `protected_globs`, never `.claude/pipeline.json`. The `protect-paths` hook denies the rest;
+- Edit only paths matching `test_globs` or `shared_globs`, and this slice's SPEC.md `## Tests`
+  bullets and `probes/`. Never product code, never `protected_globs`, never
+  `.claude/pipeline.json`, never another slice's files. The `protect-paths` hook denies the rest;
   do not route around it with shell redirection.
 - Real assertions on observable results. No `expect(true)`, no assertions inside `if`, no
   snapshot-everything, no mocking the unit under test.

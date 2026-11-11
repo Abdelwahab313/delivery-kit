@@ -20,7 +20,9 @@ the slice id. If the lens is missing, stop and say so.
 ## Inputs
 
 - `.claude/pipeline.json` (`artifacts_dir`, `docs`, `protected_globs`, `test_globs`).
-- `pipeline status` — state and the last evidence rows.
+- `pipeline status` — state and the last evidence rows. `PIPELINE=<absolute path>` is given
+  in your prompt; every `pipeline …` command here means `"$PIPELINE" …` (nothing is on PATH);
+  your working directory is the worktree path the prompt names.
 - `${CLAUDE_PLUGIN_ROOT}/rubric/code-review.md` — the only rubric. Apply it; do not invent
   categories.
 - lens=plan: `<artifacts_dir>/<feature>/PLAN.md`, `DESIGN.md` (if present), `SLICES.md`.

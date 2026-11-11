@@ -221,10 +221,27 @@ class FlowTests(RepoCase):
         with open(os.path.join(self.state_dir, "current.json")) as f:
             self.assertEqual(json.load(f), {"feature": "feat", "slice": "S01"})
         self.assertEqual(self.cli("phase", "implement").returncode, 0)
-        self.assertRegex(self.state()["base_tree"], r"^[0-9a-f]{40}$")
+        base = self.state()["base_tree"]
+        self.assertRegex(base, r"^[0-9a-f]{40}$")
+        self.write("src/x.ts", "export const x = 9;\n")
+        self.cli("phase", "review")
+        self.cli("phase", "implement")
+        self.assertEqual(self.state()["base_tree"], base)
+        self.cli("phase", "tests")
+        self.assertIsNone(self.state()["base_tree"])
+        self.cli("phase", "implement")
+        self.assertNotEqual(self.state()["base_tree"], base)
         r = self.cli("status")
         self.assertEqual(r.returncode, 0)
         self.assertIn('"phase": "implement"', r.stdout)
+
+    def test_dash_C_sets_working_directory(self):
+        self.start()
+        r = self.cli("-C", self.repo, "status", cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"phase": "plan"', r.stdout)
+        r = self.cli("status", cwd=self.tmp)
+        self.assertEqual(r.returncode, 1)
 
     def test_commands_without_state_fail_cleanly(self):
         r = self.cli("phase", "tests")
@@ -337,9 +354,12 @@ class FlowTests(RepoCase):
     def test_check_commit_requires_fresh_validate_and_verdict(self):
         self.start("implement")
         r = self.cli("check", "commit")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.evidence()[-1]["kind"], "validate")
+        self.cli("phase", "review")
+        r = self.cli("check", "commit")
         self.assertEqual(r.returncode, 2)
         self.assertIn("code review verdict is missing", r.stderr)
-        self.assertEqual(self.evidence()[-1]["kind"], "validate")
         self.assertEqual(self.cli("verdict", "code", "PASS").returncode, 0)
         self.assertEqual(self.cli("check", "commit").returncode, 0)
         self.write("src/x.ts", "export const x = 2;\n")
@@ -352,7 +372,7 @@ class FlowTests(RepoCase):
         self.assertEqual(self.cli("check", "commit").returncode, 0)
 
     def test_check_commit_needs_feature_verdict_when_probes_exist(self):
-        self.start("implement")
+        self.start("review")
         self.write("specs/feat/slices/S01/probes/01.sh", "#!/bin/sh\nexit 0\n")
         self.cli("verdict", "code", "PASS")
         r = self.cli("check", "commit")
@@ -368,12 +388,17 @@ class FlowTests(RepoCase):
             f.write("- none\n")
         self.assertEqual(self.cli("verdict", "code", "FAIL", "--findings", findings).returncode, 0)
         self.assertEqual(self.state()["verdicts"], {"code": "FAIL"})
-        self.assertTrue(os.path.isfile(os.path.join(self.state_dir, "feat", "S01", "findings-code.md")))
+        dest = os.path.join(self.state_dir, "feat", "S01", "findings-code.md")
+        self.assertTrue(os.path.isfile(dest))
+        r = self.cli("verdict", "code", "PASS", "--findings", dest)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state()["verdicts"], {"code": "PASS"})
 
     def test_check_claims(self):
         self.write("specs/feat/PLAN.md", "\n".join([
             "# Plan",
             "Open: [NEEDS CLARIFICATION: which queue]",
+            "Write a `[NEEDS CLARIFICATION: <question>]` marker; `[NEEDS CLARIFICATION: ]` and `[NEEDS CLARIFICATION: …]` are templates.",
             "| claim | receipt | tag |",
             "|---|---|---|",
             "| x is 1 | src/x.ts:1 | V |",
@@ -389,13 +414,19 @@ class FlowTests(RepoCase):
         self.assertEqual(r.returncode, 2)
         err = r.stderr
         self.assertIn("PLAN.md:2: unresolved [NEEDS CLARIFICATION]", err)
-        self.assertIn("PLAN.md:6: receipt src/x.ts:99", err)
-        self.assertIn("PLAN.md:7: row tagged V has no receipt", err)
-        self.assertIn("PLAN.md:8: receipt src/missing.ts:3", err)
+        self.assertIn("PLAN.md:3: unresolved [NEEDS CLARIFICATION]", err)
+        self.assertEqual(err.count("unresolved [NEEDS CLARIFICATION]"), 2)
+        self.assertIn("PLAN.md:7: receipt src/x.ts:99", err)
+        self.assertIn("PLAN.md:8: row tagged V has no receipt", err)
+        self.assertIn("PLAN.md:9: receipt src/missing.ts:3", err)
         self.assertIn("doc id /prisma/docs", err)
-        self.assertNotIn("PLAN.md:5:", err)
-        self.assertNotIn("PLAN.md:9:", err)
-        self.assertNotIn("PLAN.md:11:", err)
+        self.assertNotIn("PLAN.md:6:", err)
+        self.assertNotIn("PLAN.md:10:", err)
+        self.assertNotIn("PLAN.md:12:", err)
+        for tpl in ("PLAN.md", "REVIEW.md", "SPEC.md", "SLICES.md", "DESIGN.md"):
+            shutil.copyfile(os.path.join(os.path.dirname(PIPELINE), "..", "templates", tpl), os.path.join(self.repo, "specs/feat", tpl))
+            r = self.cli("check", "claims", f"specs/feat/{tpl}")
+            self.assertNotIn("NEEDS CLARIFICATION", r.stderr, tpl)
         self.write("specs/feat/PLAN.md", "| x | src/x.ts:1 | V |\n")
         self.assertEqual(self.cli("check", "claims", "specs/feat/PLAN.md").returncode, 0)
 
@@ -440,6 +471,18 @@ class HookTests(RepoCase):
         r = self.hook("h1", "h1-implementer-edit-src-exit0.json", tool_input={"file_path": "Makefile"})
         self.assertEqual(r.returncode, 2)
         self.assertIn("Makefile", r.stderr)
+        self.cli("phase", "review")
+        r = self.hook("h1", "h1-implementer-edit-src-exit0.json", tool_input={"file_path": "tests/test_a.sh"})
+        self.assertEqual(r.returncode, 2)
+
+    def test_h1_test_author_may_edit_slice_artifacts(self):
+        self.start("tests")
+        for path in ("specs/feat/slices/S01/SPEC.md", "specs/feat/slices/S01/probes/01.sh"):
+            r = self.hook("h1", "h1-test-author-edit-src-exit2.json", tool_input={"file_path": path})
+            self.assertEqual(r.returncode, 0, f"{path}: {r.stderr}")
+        for path in ("specs/feat/slices/S02/SPEC.md", "specs/feat/SLICES.md"):
+            r = self.hook("h1", "h1-test-author-edit-src-exit2.json", tool_input={"file_path": path})
+            self.assertEqual(r.returncode, 2, path)
 
     def test_h3_require_red(self):
         self.start("tests")
@@ -481,6 +524,12 @@ class HookTests(RepoCase):
         self.assertIn("validate is red", r.stderr)
         self.set_exit(0)
         self.assertEqual(self.cli("validate", "--quick").returncode, 0)
+        r = self.hook("h5", "h5-git-commit.json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.cli("phase", "review")
+        r = self.hook("h5", "h5-git-commit.json")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("code review verdict", r.stderr)
         self.cli("verdict", "code", "PASS")
         r = self.hook("h5", "h5-git-commit.json")
         self.assertEqual(r.returncode, 0, r.stderr)

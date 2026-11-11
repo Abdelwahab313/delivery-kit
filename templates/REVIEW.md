@@ -15,6 +15,6 @@ Written by the orchestrator from the reviewer's JSON block; the reviewer itself 
 | Severity | File:line | Defect | Fix |
 |---|---|---|---|
 
-## Open `[NEEDS CLARIFICATION]`
+## Open NEEDS CLARIFICATION markers
 
 - <marker verbatim> (`file:line`)
