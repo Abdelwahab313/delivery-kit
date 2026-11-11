@@ -1,0 +1,5 @@
+{
+  "name": "delivery-kit",
+  "version": "0.1.0",
+  "description": "Spec-driven, test-first delivery pipeline: planner, reviewer, test-author, implementer agents; /deliver skill; deterministic evidence gates via the pipeline CLI"
+}
