@@ -191,26 +191,31 @@ schema-typed agent outputs; needs opt-in per run [V Workflow tool schema].
 
 Facts used [V code.claude.com hooks + sub-agents docs, fetched 2026-11-11]: `PreToolUse`,
 `Stop`, `SubagentStop`, `TaskCompleted` can block (exit 2 / `decision: block`); agent
-frontmatter accepts `hooks`, `skills`, `effort`, `maxTurns`, `model`, `disallowedTools`;
-`Stop` in frontmatter becomes `SubagentStop`. [A] user-level/plugin agent hooks skip the trust
-dialog (docs say project-level ones need it). [A] PostToolUse Bash input exposes exit code —
-irrelevant in v2, evidence comes from the CLI.
+frontmatter accepts `skills`, `effort`, `maxTurns`, `model`, `disallowedTools`.
+[V ctx7 `/websites/code_claude` plugins/components + sub-agents, 2026-11-11] **plugin agents
+ignore the `hooks`, `mcpServers` and `permissionMode` frontmatter fields** — hooks must ship
+in the plugin's `hooks/hooks.json`, where `SubagentStop` entries match on `agent_type`. Those
+plugin-wide hooks apply whenever the plugin is enabled; the workspace trust dialog applies only
+to frontmatter hooks of project-level agents, so it does not apply here. [V same fetch] hook
+input carries `agent_id` and `agent_type` on `PreToolUse` (when fired inside a subagent) and
+always on `SubagentStop`, together with `agent_transcript_path` and `last_assistant_message`.
 
 | Hook | Event | Blocks when | Authority |
 |---|---|---|---|
 | H1 `protect-paths` | PreToolUse `Edit\|Write\|Bash` (plugin-wide) | phase ∈ {tests, implement} and target ∈ paths the role may not edit. For Bash: best-effort regex on redirections / `sed -i` / `git checkout --` / `rm` touching `test_globs` ∪ `protected_globs`. | speed bump — real check is H4/H5's `git diff` |
-| H3 `require-red` | SubagentStop (test-author frontmatter) | `pipeline check red` fails: no row with `kind=red`, `parsed.failed>0`, `test_hashes == current` | CLI |
-| H4 `require-green` | SubagentStop (implementer frontmatter) | `pipeline validate --quick` red, **or** `git diff --name-only <base_tree>` touches `test_globs`/`protected_globs`. Increments `block_count`; at 3 lets the agent stop with `status=blocked`. | CLI |
+| H3 `require-red` | SubagentStop, `hooks.json` matcher `agent_type = test-author` | `pipeline check red` fails: no row with `kind=red`, `parsed.failed>0`, `test_hashes == current` | CLI |
+| H4 `require-green` | SubagentStop, `hooks.json` matcher `agent_type = implementer` | `pipeline validate --quick` red, **or** `git diff --name-only <base_tree>` touches `test_globs`/`protected_globs`. Increments `block_count`; at 3 lets the agent stop with `status=blocked`. | CLI |
 | H5 `gate-commit` | PreToolUse Bash `git commit*` | `pipeline check commit` fails: no `validate` row with `tree == git write-tree` and `failed==0`, or protected-paths diff dirty, or required verdicts ≠ PASS, or a `flaky: true` row unresolved | CLI (re-runs validate when the tree hash is stale instead of trusting old rows) |
-| H6 `lint-claims` | SubagentStop (planner, reviewer `lens=plan`) | any `[NEEDS CLARIFICATION]` left; a V-tagged row without receipt; a `path:line` receipt that doesn't resolve (`test -f` and `line ≤ wc -l`); a doc id not in `pipeline.json.docs` | CLI |
+| H6 `lint-claims` | SubagentStop, `hooks.json` matcher `agent_type = planner\|reviewer` (reviewer: only when the lens is `plan`, read from `state.json`) | any `[NEEDS CLARIFICATION]` left; a V-tagged row without receipt; a `path:line` receipt that doesn't resolve (`test -f` and `line ≤ wc -l`); a doc id not in `pipeline.json.docs` | CLI |
 
 `rtk`: `pipeline` strips a leading `rtk ` and parses runner output itself, so test results are
-unaffected; the double-round-trip in auto mode remains until Q1 is decided.
+unaffected; the double-round-trip in auto mode is accepted (Q1 decided: keep rtk).
 
 Residual risk, stated: an implementer that deliberately calls `pipeline phase`/`pipeline
-verdict` via Bash can lie to the state. [A] If hook input exposes the calling agent
-(`agent_type`/name), H1 denies those subcommands for non-orchestrator agents; otherwise the
-code reviewer is the catch. The threat model is drift and laziness, not sabotage.
+verdict` via Bash can lie to the state. Hook input exposes `agent_type` inside subagents
+[V above], so H1 denies `pipeline phase|verdict` whenever `agent_type` is present and is not
+the orchestrator; the code reviewer remains the catch for anything H1's regex misses. The
+threat model is drift and laziness, not sabotage.
 
 ### Hallucination controls, end to end
 
@@ -301,7 +306,7 @@ Packaging follows the Claude Code plugin layout [V github.com/anthropics/claude-
   .claude-plugin/plugin.json      name, version
   agents/                         planner.md reviewer.md test-author.md implementer.md
   skills/deliver/SKILL.md         /deliver <feature> [--tier], /deliver init <profile>, doctor, upgrade
-  hooks/hooks.json                H1 protect-paths, H5 gate-commit (plugin-wide)
+  hooks/hooks.json                H1 protect-paths, H5 gate-commit (PreToolUse), H3/H4/H6 (SubagentStop by agent_type)
   bin/pipeline                    single-file Python 3, stdlib only; tests/ beside it
   templates/                      PLAN.md DESIGN.md SLICES.md SPEC.md REVIEW.md pipeline.json CLAUDE-snippet.md
   profiles/                       nestjs.json rails-ptc.json go.json
@@ -350,14 +355,14 @@ No per-slice cost figure is claimed here — measure it on the pilot with
 
 ---
 
-## 8. Open — decide before building
+## 8. Decisions (2026-11-11)
 
-- Q1 rtk: disable its PreToolUse hook in auto mode (recommended), or keep and accept double
-  round-trips?
-- Q2 caveman: carve-out or off during `/deliver`?
-- Q3 Orchestration default: `/deliver` skill (recommended; no opt-in friction) — Workflow
-  script as a later deterministic variant.
-- Q4 Kit repo location: `~/.claude/local-marketplace/plugins/delivery-kit` as a git repo
-  (recommended), or a separate repo symlinked in?
-- Q5 Confirm with docs before build: hook input exposes calling agent name (residual-risk
-  item); plugin-agent hooks run without the trust dialog.
+- Q1 rtk: **keep as is.** `pipeline` strips a leading `rtk ` and parses runner output itself;
+  the auto-mode double round-trip is accepted. C4 dropped.
+- Q2 caveman: **carve-out.** Plans, specs, reviews and subagent prompts are written normal;
+  verified/assumed markers are never dropped.
+- Q3 Orchestration default: **`/deliver` skill.** Workflow script is a later variant.
+- Q4 Kit location: **git repo at `~/.claude/local-marketplace/plugins/delivery-kit`**, pushed to
+  the private GitHub repo `Abdelwahab313/delivery-kit`.
+- Q5 (resolved from docs, see §2 Enforcement hooks): hook input exposes `agent_type`; plugin
+  agents ignore frontmatter `hooks`, so every SubagentStop gate lives in `hooks/hooks.json`.
